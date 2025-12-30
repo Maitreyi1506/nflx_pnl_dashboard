@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
 import time
+import plotly.graph_objs as go
 
 from strategy import (
     compute_returns,
@@ -13,7 +14,6 @@ from strategy import (
     compute_cumulative_pnl
 )
 
-
 # --------------------
 # Page config
 # --------------------
@@ -22,8 +22,14 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📈 NFLX Volatility-Targeted Trend Strategy")
+st.title("NFLX Volatility-Targeted Trend Strategy")
 st.caption("Single-asset | Long-only | Volatility-targeted")
+range_choice = st.radio(
+    "View Range",
+    ["1D", "1W", "1M", "1Y"],
+    horizontal=True
+)
+
 
 # # --------------------
 # # Load data -- OLD VERSION FROM CSV FOR STATIC 
@@ -39,76 +45,116 @@ st.caption("Single-asset | Long-only | Volatility-targeted")
 
 # prices = load_data()
 
+## -------------------
+# Load Data (Hybrid: Historical + Live)
 # -------------------
-# Load Data (NEW VERSION DYNAMIC)
-# -------------------
+
 SYMBOL = "NFLX"
-INTERVAL = "1m"
-WINDOW_SIZE = 1000  # rolling bars kept
 
-def fetch_latest_bar():
+# -------------------
+# Historical (1Y, coarser)
+# -------------------
+@st.cache_data
+def load_historical_prices():
     df = yf.download(
         SYMBOL,
-        period="1d",
-        interval=INTERVAL,
-        progress=False
-    )
-    df.columns = df.columns.get_level_values(0)
-    return df.tail(1)
-
-def bootstrap_prices():
-    df = yf.download(
-        SYMBOL,
-        period="8d",        # last ~5 trading days
-        interval=INTERVAL,
+        period="1y",
+        interval="1d",
         progress=False
     )
     df.columns = df.columns.get_level_values(0)
     df = df[['Close']].rename(columns={'Close': 'Price'})
-    return df
+    df.index = df.index.tz_localize(None)
+    return df.dropna()
 
+# -------------------
+# Live bootstrap (recent, fine)
+# -------------------
+def bootstrap_live_prices():
+    df = yf.download(
+        SYMBOL,
+        period="8d",       # max allowed for 1m
+        interval="1m",
+        progress=False
+    )
+    df.columns = df.columns.get_level_values(0)
+    df = df[['Close']].rename(columns={'Close': 'Price'})
+    df.index = df.index.tz_localize(None)
+    return df.dropna()
 
-# --------------------
+# -------------------
+# Fetch latest bar (1m)
+# -------------------
+def fetch_latest_bar():
+    df = yf.download(
+        SYMBOL,
+        period="1d",
+        interval="1m",
+        progress=False
+    )
+    df.columns = df.columns.get_level_values(0)
+    df.index = df.index.tz_localize(None)
+    return df.tail(1)
+
+# -------------------
 # Initialize price buffer (run once)
-# --------------------
+# -------------------
 if "prices" not in st.session_state:
-    st.session_state.prices = bootstrap_prices()
+    historical = load_historical_prices()
+    live = bootstrap_live_prices()
 
-# --------------------
-# Fetch latest market data
-# --------------------
+    st.session_state.prices = (
+        pd.concat([historical, live])
+        .sort_index()
+        .drop_duplicates()
+    )
+
+# -------------------
+# Live update
+# -------------------
 latest = fetch_latest_bar()
 
 if not latest.empty:
     latest = latest[['Close']].rename(columns={'Close': 'Price'})
-    st.session_state.prices = (
-        pd.concat([st.session_state.prices, latest])
-        .drop_duplicates()
-    )
+    st.session_state.prices.loc[latest.index[0]] = latest.iloc[0]
 
-# --------------------
-# Maintain rolling window
-# --------------------
-st.session_state.prices = st.session_state.prices.tail(WINDOW_SIZE)
-
-# --------------------
-# Reference prices from session state
-# --------------------
+# -------------------
+# Reference prices
+# -------------------
 prices = st.session_state.prices
+# st.write("Earliest timestamp:", prices.index.min())
+# st.write("Latest timestamp:", prices.index.max())
+# st.write("Total rows:", len(prices))
 
 # --------------------
 # Run strategy ONLY if enough data
 # --------------------
-if len(prices) >= 60:  # enough for MA(50) + vol window
+if "strategy_computed_until" not in st.session_state:
+    st.session_state.strategy_computed_until = prices.index.min()
+
+new_data = prices.index > st.session_state.strategy_computed_until
+
+if new_data.any():
     prices = compute_returns(prices)
     prices = compute_realized_vol(prices, window=20)
     prices = compute_signal(prices, ma_window=50)
     prices = compute_position(prices, target_vol=0.10)
     prices = compute_cumulative_pnl(prices)
 
-    # Store back into session state
-    st.session_state.prices = prices
+    st.session_state.strategy_computed_until = prices.index.max()
 
+START_DATE = pd.Timestamp("2025-01-01")
+
+now = prices.index.max()
+
+if range_choice == "1D":
+    plot_prices = prices[prices.index >= now - pd.Timedelta(days=1)]
+elif range_choice == "1W":
+    plot_prices = prices[prices.index >= now - pd.Timedelta(days=7)]
+elif range_choice == "1M":
+    plot_prices = prices[prices.index >= now - pd.Timedelta(days=30)]
+elif range_choice == "1Y":
+    plot_prices = prices[prices.index >= START_DATE]  
 # # --------------------
 # # Compute metrics
 # # --------------------
@@ -131,44 +177,72 @@ if "PnL" not in prices.columns:
     st.info("⏳ Strategy warming up… PnL not available yet.")
     st.write("Rows:", len(prices))
     st.write("Columns:", prices.columns.tolist())
-    st.stop()  # ⬅️ THIS IS THE KEY
+    st.stop()  
 
 # --------------------
 # Compute metrics (minute-level, NOT annualized)
 # --------------------
-mean_pnl = prices['PnL'].mean()
-pnl_vol = prices['PnL'].std()
+mean_pnl = plot_prices['PnL'].mean()
+pnl_vol = plot_prices['PnL'].std()
 sharpe = mean_pnl / pnl_vol if pnl_vol != 0 else np.nan
 
-cum = prices['cumu_PnL']
+cum = plot_prices['cumu_PnL']
 drawdown = cum - cum.cummax()
 max_dd = drawdown.min()
 
-time_in_market = prices['Signal'].mean()
+time_in_market = plot_prices['Signal'].mean()
 
 st.session_state.prices = prices
-
+# st.write("Earliest timestamp:", prices.index.min())
+# st.write("Latest timestamp:", prices.index.max())
+# st.write("Total rows:", len(prices))
 # --------------------
 # Metrics row
 # --------------------
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("Mean PnL (per min)", f"{mean_pnl:.6f}")
-col2.metric("PnL Vol (per min)", f"{pnl_vol:.6f}")
-col3.metric("Max Drawdown", f"{max_dd:.2%}")
-col4.metric("Time in Market", f"{time_in_market:.1%}")
+suffix = f"({range_choice})"
+
+col1.metric(f"Sharpe {suffix}", f"{sharpe:.2f}")
+col2.metric(f"Mean PnL {suffix}", f"{mean_pnl:.6f}")
+col3.metric(f"Max Drawdown {suffix}", f"{max_dd:.2%}")
+col4.metric(f"Time in Market {suffix}", f"{time_in_market:.1%}")
+
 
 # --------------------
 # Cumulative PnL plot
 # --------------------
-st.subheader("Cumulative PnL")
+st.subheader("Cumulative PnL") #Interactive
 
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(prices.index, prices['cumu_PnL'], color='hotpink', linewidth=2)
-ax.set_ylabel("Cumulative Return")
-ax.grid(alpha=0.3)
+fig_plotly = go.Figure()
+fig_plotly.add_trace(go.Scatter(
+    x=plot_prices.index, 
+    y=plot_prices['cumu_PnL'], 
+    mode='lines',
+    line=dict(color='hotpink', width=2),
+    name='Cumulative PnL'
+))
+fig_plotly.update_layout(
+    yaxis_title="Cumulative Return",
+    plot_bgcolor='rgba(0,0,0,0)',
+    xaxis_title="",
+    margin=dict(l=20, r=20, t=40, b=20),
+    hovermode="x unified"
+)
+fig_plotly.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(200,200,200,0.09)')
+fig_plotly.update_xaxes(range=[plot_prices.index.min(), plot_prices.index.max()])
+fig_plotly.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(200,200,200,0.09)')
 
-st.pyplot(fig)
+st.plotly_chart(fig_plotly, width = 'stretch')
+
+# st.subheader("Cumulative PnL")
+
+# fig, ax = plt.subplots(figsize=(10, 4))
+# ax.plot(prices.index, prices['cumu_PnL'], color='hotpink', linewidth=2)
+# ax.set_ylabel("Cumulative Return")
+# ax.grid(alpha=0.3)
+
+# st.pyplot(fig)
 
 # # --------------------
 # # Position plot
@@ -183,32 +257,82 @@ st.pyplot(fig)
 # st.pyplot(fig2)
 
 # -------------------
-# Netflix Volatility Trend Regimes
+# Netflix Volatility Trend Regimes (Interactive)
 # -------------------
 st.subheader("NFLX Trend Regimes")
-fig2, ax2  = plt.subplots(figsize=(10,4))
-ax2.plot(prices.index, prices['Price'], label='Price', alpha=0.6)
-ax2.plot(prices.index, prices['ma_50'], label='50-day MA', color='hotpink')
 
-ax2.fill_between(
-    prices.index,
-    prices['Price'].min(),
-    prices['Price'].max(),
-    where=prices['Signal'] == 1,
-    color='pink',
-    alpha=0.15,
-    label='Long regime'
-)
+fig_plotly2 = go.Figure()
 
-ax2.legend()
-ax2.grid(alpha=0.3)
-st.pyplot(fig2)
+# Price Line
+fig_plotly2.add_trace(go.Scatter(
+    x=plot_prices.index, 
+    y=plot_prices['Price'],
+    mode='lines',
+    name='Price',
+    line=dict(color='grey', width=1.5),
+    opacity=0.7
+))
+
+# 50-day MA Line
+fig_plotly2.add_trace(go.Scatter(
+    x=plot_prices.index, 
+    y=plot_prices['ma_50'],
+    mode='lines',
+    name='50-day MA',
+    line=dict(color='hotpink', width=2)
+))
+
+long_mask = plot_prices['Signal'] == 1
+
+shapes = []
+in_region = False
+start_idx = None
+
+for i in range(len(long_mask)):
+    if long_mask.iloc[i] and not in_region:
+        start_idx = i
+        in_region = True
+    elif not long_mask.iloc[i] and in_region:
+        shapes.append(dict(
+            type="rect",
+            xref="x",
+            yref="paper",
+            x0=plot_prices.index[start_idx],
+            x1=plot_prices.index[i-1],
+            y0=0,
+            y1=1,
+            fillcolor="hotpink",
+            opacity=0.12,
+            layer="below",
+            line_width=0
+        ))
+        in_region = False
+
+if in_region:
+    shapes.append(dict(
+        type="rect",
+        xref="x",
+        yref="paper",
+        x0=plot_prices.index[start_idx],
+        x1=plot_prices.index[-1],
+        y0=0,
+        y1=1,
+        fillcolor="hotpink",
+        opacity=0.12,
+        layer="below",
+        line_width=0
+    ))
+
+fig_plotly2.update_layout(shapes=shapes)
+fig_plotly2.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(200,200,200,0.09)')
+fig_plotly2.update_xaxes(range=[plot_prices.index.min(), plot_prices.index.max()])
+fig_plotly2.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(200,200,200,0.09)')
+
+st.plotly_chart(fig_plotly2, width='stretch')
 
 # --------------------
 # Optional raw data
 # --------------------
 with st.expander("Show recent data"):
-    st.dataframe(prices.tail(20))
+    st.dataframe(plot_prices.tail(20))
 
-time.sleep(5)
-st.rerun()
