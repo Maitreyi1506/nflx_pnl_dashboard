@@ -24,6 +24,43 @@ st.set_page_config(
 
 st.title("NFLX Volatility-Targeted Trend Strategy")
 st.caption("Single-asset | Long-only | Volatility-targeted")
+st.caption(
+    "A simple trend-following strategy on NFLX that scales exposure to target a fixed volatility. "
+    "Designed to explore how explicit risk control changes intuition around returns."
+)
+with st.expander("Strategy Overview"):
+    st.markdown("""
+    The following explanation is AI generated.  
+**Universe:** Single asset (NFLX)  
+**Frequency:** Intraday execution with daily context  
+**Style:** Long-only trend following  
+
+### 1. Returns
+Minute-level log returns are computed from price data.
+
+### 2. Volatility Estimation
+Realized volatility is estimated using a rolling window of recent returns.
+
+### 3. Trend Signal
+A simple moving-average filter is used:
+- If price > moving average → bullish regime
+- Otherwise → flat (no position)
+
+This avoids shorting and focuses on participation during sustained uptrends.
+
+### 4. Volatility Targeting
+Position size is scaled inversely with realized volatility to target a fixed annualized risk level.
+When volatility rises, exposure is reduced; when volatility falls, exposure increases.
+
+### 5. PnL
+PnL is computed from the product of position and returns and accumulated over time.
+
+This setup is intentionally minimal and serves as a sandbox for studying:
+- regime dependence
+- risk-adjusted performance
+- stability of signals across time horizons
+""")
+
 range_choice = st.radio(
     "View Range",
     ["1D", "1W", "1M", "1Y"],
@@ -212,8 +249,11 @@ col4.metric(f"Time in Market {suffix}", f"{time_in_market:.1%}")
 # --------------------
 # Cumulative PnL plot
 # --------------------
-st.subheader("Cumulative PnL") #Interactive
-
+# st.subheader("Cumulative PnL") #Interactive
+st.markdown(
+    "<h3 style='color:#ff4fa3;'>Cumulative PnL</h3>",
+    unsafe_allow_html=True
+)
 fig_plotly = go.Figure()
 fig_plotly.add_trace(go.Scatter(
     x=plot_prices.index, 
@@ -259,7 +299,12 @@ st.plotly_chart(fig_plotly, width = 'stretch')
 # -------------------
 # Netflix Volatility Trend Regimes (Interactive)
 # -------------------
-st.subheader("NFLX Trend Regimes")
+
+# st.subheader("NFLX Trend Regimes")
+st.markdown(
+    "<h3 style='color:#ff4fa3;'>NFLX Trend Regimes</h3>",
+    unsafe_allow_html=True
+)
 
 fig_plotly2 = go.Figure()
 
@@ -329,6 +374,16 @@ fig_plotly2.update_xaxes(range=[plot_prices.index.min(), plot_prices.index.max()
 fig_plotly2.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(200,200,200,0.09)')
 
 st.plotly_chart(fig_plotly2, width='stretch')
+with st.expander("Reading the Charts"):
+    st.markdown("""
+- **Pink shaded regions** indicate periods where the strategy is in a long position.
+- The **grey price line** shows NFLX price action.
+- The **pink moving average** represents the trend filter.
+- Cumulative PnL reflects strategy performance, not raw price returns.
+
+Use the range selector at the top to switch between short-term and long-term views.
+Metrics update automatically to reflect the selected window.
+""")
 
 # --------------------
 # Optional raw data
@@ -336,3 +391,8 @@ st.plotly_chart(fig_plotly2, width='stretch')
 with st.expander("Show recent data"):
     st.dataframe(plot_prices.tail(20))
 
+with st.expander("Notes"):
+    st.markdown("""
+This dashboard is for educational and exploratory purposes only.
+Transaction costs, slippage, and execution constraints are not modeled.
+""")
